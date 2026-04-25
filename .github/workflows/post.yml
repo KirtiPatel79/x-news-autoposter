@@ -1,0 +1,75 @@
+name: Post to X
+
+on:
+  schedule:
+    # Run every 2 hours. The app's own active-hours gate enforces no-overnight,
+    # so cron firing during quiet hours is a cheap no-op.
+    - cron: "5 */2 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (do not actually post)"
+        required: false
+        default: "false"
+      ignore_gate:
+        description: "Ignore active-hours / min-gap / daily-cap gates"
+        required: false
+        default: "false"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: x-news-autoposter
+  cancel-in-progress: false
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Restore state
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: x-news-state-${{ github.run_id }}
+          restore-keys: |
+            x-news-state-
+
+      - name: Run
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          X_CONSUMER_KEY: ${{ secrets.X_CONSUMER_KEY }}
+          X_CONSUMER_SECRET: ${{ secrets.X_CONSUMER_SECRET }}
+          X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
+          X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
+        run: |
+          if [ ! -f config.toml ]; then cp config.example.toml config.toml; fi
+          DRY_FLAG=""
+          IG_FLAG=""
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then DRY_FLAG="--dry-run"; fi
+          if [ "${{ github.event.inputs.dry_run }}" = "false" ]; then DRY_FLAG="--no-dry-run"; fi
+          if [ "${{ github.event.inputs.ignore_gate }}" = "true" ]; then IG_FLAG="--ignore-gate"; fi
+          x-news -v run-once $DRY_FLAG $IG_FLAG
+
+      - name: Commit state
+        if: always()
+        run: |
+          git config user.name "x-news-autoposter[bot]"
+          git config user.email "actions@users.noreply.github.com"
+          git add -f data/state.db || true
+          if ! git diff --staged --quiet; then
+            git commit -m "chore: update state [skip ci]"
+            git push
+          fi
